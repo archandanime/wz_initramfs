@@ -1,71 +1,83 @@
 #!/bin/sh
-## wz_mini initramfs init
+#
+# wz_mini initramfs init
+#
 
 exec 1> /tmp/wz_mini_initramfs.log 2>&1
-
 set -x
-
-echo "Welcome to wz_mini initramfs"
-WZMINI_CONFIG_FILE=/sdcard/wz_mini/wz_mini.conf
-WZMINI_INIT_FILE=/sdcard/wz_mini/etc/init.d/wz_init.sh
-WZMINI_INIT_FILE_NEWROOT=/opt/wz_mini/etc/init.d/wz_init.sh
-WZMINI_OVERLAY_FILE=/sdcard/wz_mini-overlay.img
-WZMINI_OVERLAY_EMPTY_COMPRESSED_FILE=/sdcard/wz_mini/overlay_empty.img.gz
-WZMINI_KERNEL_MODULE_PATH=/sdcard/wz_mini/lib/modules/3.10.14__isvp_swan_1.0__
 
 
 ##### MOUNTING VIRTUAL FILE SYSTEMS  #####
-# devtmpfs does not get automounted for initramfs
 mount -t devtmpfs devtmpfs /dev
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 
 
 ##### INITIALIZING GPIO #####
-# Required delay on T20/T31
-sleep 1
-
+echo "Initializing GPIO"
+sleep 1 # Required delay on T20/T31
 echo "Check for T20 platform"
-
-if [ -b /dev/mtdblock10 ]; then
+	if [ -b /dev/mtdblock10 ]; then
 	echo "Found T20"
-
-	# T20: Need to export the sd card enable gpio manually
-	echo 43 > /sys/class/gpio/export
-	echo in > /sys/class/gpio/gpio43/direction
-
-	# T20: Insert required delay for sd card init
+	echo 43 > /sys/class/gpio/export # T20: Need to export the sd card enable gpio manually
+	echo in > /sys/class/gpio/gpio43/direction # T20: Insert required delay for sd card init
 	sleep 3
 else
 	echo "Not T20"
 fi
-
-if ! [ -d /sys/class/gpio/gpio38 ]; then
+	if ! [ -d /sys/class/gpio/gpio38 ]; then
 	echo 38 > /sys/class/gpio/export
 	echo out > /sys/class/gpio/gpio38/direction
 	echo 1 > /sys/class/gpio/gpio38/value
 fi
-
-if ! [ -d /sys/class/gpio/gpio39 ]; then
+	if ! [ -d /sys/class/gpio/gpio39 ]; then
 	echo 39 > /sys/class/gpio/export
 	echo out > /sys/class/gpio/gpio39/direction
 	echo 1 > /sys/class/gpio/gpio39/value
 fi
+}
+
+
+##### DEBUGGING #####
+echo "Press any key to interupt init" > /dev/console
+exec 0< /dev/console
+read -n 1 -s -r -t 2
+if [ $? -eq 0 ]; then
+	exec 1> /dev/console
+	exec 2> /dev/console
+	echo "Dropping to initramfs shell"	
+	exec /bin/sh
+fi
+
+
+
+echo "Welcome to wz_mini initramfs"
+
+
+
+##### SETTING VARIABLES #####
+WZMINI_CONFIG_FILE="/sdcard/wz_mini/wz_mini.conf"
+WZMINI_INIT_FILE="/sdcard/wz_mini/etc/init.d/wz_init.sh"
+WZMINI_INIT_FILE_NEWROOT="/opt/wz_mini/etc/init.d/wz_init.sh"
+WZMINI_OVERLAY_FILE="/sdcard/wz_mini-overlay.img"
+WZMINI_OVERLAY_EMPTY_COMPRESSED_FILE="/sdcard/wz_mini/overlay_empty.img.gz"
+WZMINI_KERNEL_MODULE_PATH="/sdcard/wz_mini/lib/modules/3.10.14__isvp_swan_1.0__"
 
 
 ##### MOUNTING SD CARD AND STOCK ROOTFS #####
 mkdir /sdcard
-mkdir /sdcard2 # Create this temporary directory to store log file on SD card regardless of where it is mounted before switching root
+mkdir /sdcard_log
 mkdir /rom
 mkdir /newroot
 mount -t squashfs /dev/mtdblock2 /rom
 mount -t vfat /dev/mmcblk0p1 /sdcard -o rw,umask=0000,dmask=0000
-mount -t vfat /dev/mmcblk0p1 /sdcard2 -o rw,umask=0000,dmask=0000
+mount -t vfat /dev/mmcblk0p1 /sdcard_log -o rw,umask=0000,dmask=0000
 cp /sdcard/wz_mini/bin/busybox /tmp/busybox
 
 
 fsck_sdcard() {
 	echo "Running fsck on SD Card"
+	echo "---------- begin of fsck ----------"
 	/led.sh &
 	led_pid="$!"
 	cp /sdcard/wz_mini/bin/fsck.vfat /tmp/fsck.vfat
@@ -77,6 +89,7 @@ fsck_sdcard() {
 	kill $led_pid
 	echo 1 > /sys/class/gpio/gpio39/value
 	echo 0 > /sys/class/gpio/gpio38/value
+	echo "---------- end of fsck ----------"
 }
 
 move_virtual_filesystems() { # Move virtual file systems to new root
@@ -86,20 +99,24 @@ move_virtual_filesystems() { # Move virtual file systems to new root
 	mount --move /proc /newroot/proc
 }
 
+
+copy_log_to_sdcard() {
+	cp /tmp/wz_mini_initramfs.log /sdcard_log/wz_mini_initramfs.log
+	umount /sdcard_log
+}
+
 boot_stock() {
 	mount --move /rom /newroot
 	move_virtual_filesystems
 	echo "Switching root to /newroot with stock init"
-	cp /tmp/wz_mini_initramfs.log /sdcard2/wz_mini_initramfs.log
-	umount /sdcard2
+	copy_log_to_sdcard
 	exec busybox switch_root /newroot /linuxrc
 }
 
 boot_wz_mini() {
 	move_virtual_filesystems
 	echo "Switching root to /newroot with wz_mini init"
-	cp /tmp/wz_mini_initramfs.log /sdcard2/wz_mini_initramfs.log
-	umount /sdcard2
+	copy_log_to_sdcard
 	exec busybox switch_root /newroot $WZMINI_INIT_FILE_NEWROOT
 }
 
@@ -150,8 +167,7 @@ mount_overlay_rootfs() { # Mount rootfs as overlay
 }
 
 
-
-##### ERROR CHECKING AND DEBUGGING #####
+##### ERROR CHECKING #####
 if ! [ -f $WZMINI_CONFIG_FILE ]; then
 	echo "$WZMINI_CONFIG_FILE is missing, falling back to stock firmware"
 	boot_stock
@@ -159,15 +175,6 @@ fi
 
 /tmp/busybox dos2unix $WZMINI_CONFIG_FILE
 source $WZMINI_CONFIG_FILE
-
-if [ "$DEBUG_INITRAMFS_ENABLED" == "true" ]; then
-	echo "DEBUG_INITRAMFS_ENABLED value is true"
-	echo "Starting initramfs debug mode"
-	exec &>/dev/ttyS1
-	exec /bin/sh
-else
-	echo "DEBUG_INITRAMFS_ENABLED value is false"
-fi
 
 if [ "$ENABLE_FSCK_ON_BOOT" == "true" ]; then
 	echo "ENABLE_FSCK_ON_BOOT value is true"
